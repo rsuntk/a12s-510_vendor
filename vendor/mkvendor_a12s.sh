@@ -158,6 +158,20 @@ done
 chown 0:0 "$TREE/lib64/libui_shim.so"; chmod 644 "$TREE/lib64/libui_shim.so"
 label vendor_file "$TREE/lib64/libui_shim.so"
 cp "$TREE/lib64/libexynoscamera3.so" "$WORK/libexynoscamera3.so"
+# On 5.10 (/dev/dma_heap) A14 libion_exynos exynos_ion_close() is a no-op; rewire dmabuf free calls to close().
+python3 - "$WORK/libexynoscamera3.so" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = bytearray(open(p, "rb").read())
+OLD, NEW = 0x283a00, 0x283a90
+assert d[OLD:OLD + 16] == bytes.fromhex("700000d0113247f91082399120021fd6")
+assert d[NEW:NEW + 16] == bytes.fromhex("700000d0115647f910a23a9120021fd6")
+bl = lambda pc, dst: 0x94000000 | (((dst - pc) >> 2) & 0x3ffffff)
+for pc in (0xf6bf4, 0xf838c, 0xf9874, 0x207564):
+    assert struct.unpack_from("<I", d, pc)[0] == bl(pc, OLD), hex(pc)
+    struct.pack_into("<I", d, pc, bl(pc, NEW))
+open(p, "wb").write(d)
+PY
 patchelf --add-needed libui_shim.so "$WORK/libexynoscamera3.so"
 cat "$WORK/libexynoscamera3.so" > "$TREE/lib64/libexynoscamera3.so"
 
