@@ -118,11 +118,6 @@ a12s etc/libnfc-nxp.conf 644 0 vendor_configs_file
 a12s etc/nfc/libnfc-nxp_RF.conf 644 0 vendor_configs_file
 a12s firmware/nfc/libpn557_fw.so 644 0 vendor_fw_file
 
-# A14 calliope firmware data aborts on the a12s abox driver; the a12s firmware and topology go back
-for f in calliope_sram.bin calliope_dram.bin calliope_sram_2.bin calliope_dram_2.bin abox_tplg.bin abox_tplg.conf; do
-    a12s_over "firmware/$f" "firmware/$f"
-done
-
 # The kernel refuses the legacy ../etc/wifi firmware name and has no lnk_file read on vendor_fw_file,
 # so the WLBT set is copied to /vendor/firmware/wifi as on xcover5
 [ ! -e "$TREE/firmware/wifi" ]

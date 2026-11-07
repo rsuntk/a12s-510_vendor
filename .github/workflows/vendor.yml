@@ -50,24 +50,6 @@ jobs:
         done < odm.list
         rm odm.list
         cat odm/etc/vintf/manifest_hce.xml odm/etc/vintf/manifest_disabled.xml
-    - name: Fetch a12s abox firmware
-      working-directory: stock/a12s_vendor
-      run: |
-        B=https://gitlab.com/SavedByLight/android_dump_samsung_a12s_bimary-D/-/raw/TP1A.220624.014/vendor
-        mkdir -p firmware
-        cat > abox.sha256 <<'EOF'
-        f8fbb548f779dc1bcc8a664344e7340e78df26e0863efc299b57e44272f14bd8  firmware/abox_tplg.bin
-        b642eb99bbe340d014372df0f193a17b3a71d4226a657c1b739d9f2563b8041a  firmware/abox_tplg.conf
-        e663cc0c4ec9f0fd232ec2a097bf63de0c944150c3315bc518b3d9461a677efb  firmware/calliope_dram.bin
-        a06c4f6fd394108d0dddd07a787fbd02702589e6624803ae0948d03450108f73  firmware/calliope_dram_2.bin
-        396372ba05d7b2bb3ef6bdab8bafbba3f12ec88bae2e62a0a34f7d09c77d063e  firmware/calliope_sram.bin
-        e28c50cdbb9db384c10189b10ca6a2048a89004042029c92d47abb3c1520ec31  firmware/calliope_sram_2.bin
-        EOF
-        while read -r _ f; do
-          curl -sSfL --retry 5 --retry-delay 20 --retry-all-errors -o "$f" "$B/$f"
-        done < abox.sha256
-        sha256sum -c abox.sha256
-        rm abox.sha256
     - name: Build vendor
       run: |
         NAME=langsdorff@a12s-$(git rev-parse --short HEAD)_vendor
