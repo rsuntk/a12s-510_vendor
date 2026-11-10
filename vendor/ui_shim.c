@@ -1,7 +1,11 @@
 // The a12s camera HAL calls GraphicBufferMapper::unlock(buffer_handle_t), which the A14 libui no longer exports;
 // it is rebuilt on top of unlock(buffer_handle_t, base::unique_fd*) the way the old libui did it.
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 struct native_handle;

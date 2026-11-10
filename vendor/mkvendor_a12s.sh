@@ -19,6 +19,12 @@ TREE=$WORK/vendor
 trap 'rm -rf "$WORK"' EXIT
 
 label() { setfattr -n security.selinux -v "u:object_r:$1:s0" "$2"; }
+own_lib() { chown 0:0 "$TREE/$1"; chmod 644 "$TREE/$1"; label "$2" "$TREE/$1"; }
+# shim_cc <target> <soname> <output> <cc args...>
+shim_cc() {
+    local target=$1 soname=$2 out=$3; shift 3
+    "$CC" --target="$target" -shared -fPIC -O2 -Wall -Werror -Wl,-soname,"$soname" -o "$out" "$@"
+}
 
 fsck.erofs --extract="$TREE" --xattrs --preserve --overwrite "$A14_IMG"
 
@@ -67,11 +73,9 @@ for f in bin/hw/android.hardware.gatekeeper@1.0-service \
          tee/00000000-0000-0000-0000-4b45594d5354 tee/00000000-0000-0000-0000-474154454b45; do
     xc5_over "$f"
 done
-"$CC" --target=aarch64-linux-android30 -shared -fPIC -O2 -Wall -Werror -Wl,-soname,libcrypto_shim.so \
-    -o "$TREE/lib64/libcrypto_shim.so" "$KIT/crypto_shim.c"
+shim_cc aarch64-linux-android30 libcrypto_shim.so "$TREE/lib64/libcrypto_shim.so" "$KIT/crypto_shim.c"
 patchelf --add-needed libcrypto.so "$TREE/lib64/libcrypto_shim.so"
-chown 0:0 "$TREE/lib64/libcrypto_shim.so"; chmod 644 "$TREE/lib64/libcrypto_shim.so"
-label vendor_file "$TREE/lib64/libcrypto_shim.so"
+own_lib lib64/libcrypto_shim.so vendor_file
 for l in libkeymaster_helper.so libkeymaster_portable.so libkeymaster4support.so libkeymaster4_1support.so \
          libskeymaster4device.so; do
     cp "$TREE/lib64/$l" "$WORK/$l"
@@ -131,8 +135,7 @@ find "$TREE/firmware/wifi" -type f -exec chmod 644 {} +
 # The A14 HWL loads the legacy module as camera.<ro.hardware>.
 # The A14 HWL camera_module_t has two more hooks before set_callbacks; camera_shim.c re-lays the a12s HMI.
 a12s lib64/hw/camera.exynos850.so 644 0 vendor_file
-"$CC" --target=aarch64-linux-android30 -shared -fPIC -O2 -Wall -Werror -Wl,-soname,camera.s5e3830.so \
-    -o "$WORK/camera.s5e3830.so" "$KIT/camera_shim.c" -llog
+shim_cc aarch64-linux-android30 camera.s5e3830.so "$WORK/camera.s5e3830.so" "$KIT/camera_shim.c" -llog
 cat "$WORK/camera.s5e3830.so" > "$TREE/lib64/hw/camera.s5e3830.so"
 for l in libexynoscamera3.so libexynoscamera_plugin.so libexynoscamera_plugin_utils.so libremosaic_wrapper.so \
          libsec2lsi_conversion.so libexynoscamera_tdnr_plugin.so libmfb.so; do
@@ -148,10 +151,8 @@ for f in is_lib.bin is_rta.bin; do
     cat "$WORK/$f" > "$TREE/firmware/$f"
 done
 
-"$CC" --target=aarch64-linux-android30 -shared -fPIC -O2 -Wall -Werror -Wl,-soname,libui_shim.so -Wl,-z,defs \
-    -o "$TREE/lib64/libui_shim.so" "$KIT/ui_shim.c" "$TREE/lib64/libui.so"
-chown 0:0 "$TREE/lib64/libui_shim.so"; chmod 644 "$TREE/lib64/libui_shim.so"
-label vendor_file "$TREE/lib64/libui_shim.so"
+shim_cc aarch64-linux-android30 libui_shim.so "$TREE/lib64/libui_shim.so" -Wl,-z,defs "$KIT/ui_shim.c" "$TREE/lib64/libui.so"
+own_lib lib64/libui_shim.so vendor_file
 cp "$TREE/lib64/libexynoscamera3.so" "$WORK/libexynoscamera3.so"
 # On 5.10 (/dev/dma_heap) A14 libion_exynos exynos_ion_close() is a no-op; rewire dmabuf free calls to close().
 python3 - "$WORK/libexynoscamera3.so" <<'PY'
@@ -165,10 +166,57 @@ bl = lambda pc, dst: 0x94000000 | (((dst - pc) >> 2) & 0x3ffffff)
 for pc in (0xf6bf4, 0xf838c, 0xf9874, 0x207564):
     assert struct.unpack_from("<I", d, pc)[0] == bl(pc, OLD), hex(pc)
     struct.pack_into("<I", d, pc, bl(pc, NEW))
+# the remosaic PP takes its client from libion ion_open(), a real fd
+ION_CLOSE = 0x284760
+assert d[ION_CLOSE:ION_CLOSE + 16] == bytes.fromhex("700000d0118a42f91042149120021fd6")
+for pc in (0x2781f0, 0x278674):
+    assert struct.unpack_from("<I", d, pc)[0] == bl(pc, OLD), hex(pc)
+    struct.pack_into("<I", d, pc, bl(pc, ION_CLOSE))
 open(p, "wb").write(d)
 PY
 patchelf --add-needed libui_shim.so "$WORK/libexynoscamera3.so"
+# The a12s HAL inlines the JPEG encoder setters; A14 libhwjpeg moved width/height 4 bytes down, xcover5 did not.
+xc5 lib64/libgiantmscl.so 644 0 vendor_file
+cp "$XC5/lib64/libhwjpeg.so" "$TREE/lib64/libhwjpeg_a12s.so"
+# Its encoder is 8 bytes larger than the HAL allocates: the constructor and encode() zero the last appinfo slot,
+# which is the pipe's debug buffer pointer or, for the JPEG node, past the end of a 1576 byte heap block.
+python3 - "$TREE/lib64/libhwjpeg_a12s.so" <<'PY'
+import sys
+p = sys.argv[1]
+d = bytearray(open(p, "rb").read())
+for off, old in ((0x10fac, "7f1603f9"), (0x11b50, "df1603f9"), (0x11c18, "ff1603f9")):
+    assert d[off:off + 4] == bytes.fromhex(old), hex(off)
+    d[off:off + 4] = bytes.fromhex("1f2003d5")
+open(p, "wb").write(d)
+PY
+patchelf --set-soname libhwjpeg_a12s.so "$TREE/lib64/libhwjpeg_a12s.so"
+own_lib lib64/libhwjpeg_a12s.so vendor_file
+cp "$TREE/lib64/hw/camera.exynos850.so" "$WORK/camera.exynos850.so"
+patchelf --replace-needed libhwjpeg.so libhwjpeg_a12s.so "$WORK/libexynoscamera3.so"
+patchelf --replace-needed libhwjpeg.so libhwjpeg_a12s.so "$WORK/camera.exynos850.so"
+cat "$WORK/camera.exynos850.so" > "$TREE/lib64/hw/camera.exynos850.so"
 cat "$WORK/libexynoscamera3.so" > "$TREE/lib64/libexynoscamera3.so"
+
+# Stock libion.so only knows /dev/ion, which this kernel does not have; the shim allocates from dma-buf heaps.
+# It stays same_process_hal_file as in vendor_file_contexts: the mapper pulls it into app processes.
+shim_cc aarch64-linux-android30 libion.so "$TREE/lib64/libion.so" -Wl,-z,defs "$KIT/ion_shim.c" -llog
+own_lib lib64/libion.so same_process_hal_file
+shim_cc armv7a-linux-androideabi30 libion.so "$TREE/lib/libion.so" -Wl,-z,defs "$KIT/ion_shim.c" -llog
+own_lib lib/libion.so same_process_hal_file
+
+# a12s has no proximity chip on the sensorhub, only the touch ear detect behind the Hover Proximity sensor.
+# The A14 multihal list has no inputvirtual subhal, a12s loads it like the stock hals.conf
+python3 "$KIT/proxhal_patch.py" "$TREE/lib64/sensors.inputvirtual.so" "$WORK/sensors.inputvirtual.so"
+cat "$WORK/sensors.inputvirtual.so" > "$TREE/lib64/sensors.inputvirtual.so"
+hc=$TREE/etc/sensors/hals.conf
+grep -q inputvirtual "$hc" || printf '\n/vendor/lib64/sensors.inputvirtual.so\n' >> "$hc"
+grep -v '^$' "$hc" > "$TREE/tmp"
+cat "$TREE/tmp" > "$hc"
+rm "$TREE/tmp"
+
+# a12s has no ambient light chip on the sensorhub, CameraLightSensor uses this EV-Lux table
+install -D -m 644 -o 0 -g 0 "$KIT/ev_lux_map_config.xml" "$TREE/etc/ev_lux_map_config.xml"
+label vendor_configs_file "$TREE/etc/ev_lux_map_config.xml"
 
 save() {
     cat "$TREE/tmp" > "$TREE/$1"
